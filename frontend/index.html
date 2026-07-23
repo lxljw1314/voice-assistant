@@ -651,8 +651,8 @@
             <div class="settings-row">
                 <span class="settings-label">TTS 引擎</span>
                 <select class="settings-select" id="ttsEngineSelect">
-                    <option value="edge">Edge TTS</option>
                     <option value="bailian">百炼 TTS</option>
+                    <option value="edge">Edge TTS</option>
                 </select>
             </div>
             <div class="settings-row" id="edgeTTSOptions">
@@ -773,6 +773,12 @@
             bailianTTSOptions.style.display = 'flex';
         }
     });
+
+    // 初始化显示百炼 TTS 选项
+    if (ttsEngineSelect.value === 'bailian') {
+        edgeTTSOptions.style.display = 'none';
+        bailianTTSOptions.style.display = 'flex';
+    }
 
     clearBtn.addEventListener('click', async () => {
         try {
@@ -903,8 +909,8 @@
                 // 检查是否只包含语气词
                 const isOnlyNoise = cleanText.split('').every(char => NOISE_CHARS.includes(char));
                 
-                // 过滤：只包含语气词 或 长度<=3
-                if (isOnlyNoise || cleanText.length <= 3) {
+                // 只过滤纯语气词（如"嗯"、"呃"），不过滤短文本
+                if (isOnlyNoise) {
                     console.log('🗑️ 过滤底噪:', JSON.stringify(text), '->', JSON.stringify(cleanText));
                     return;
                 }
@@ -1031,25 +1037,58 @@
                 audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } 
             });
 
-            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+            // 尝试创建 16kHz 的 AudioContext，但浏览器可能不支持
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const actualSampleRate = audioContext.sampleRate;
+            console.log(`🎤 AudioContext 实际采样率: ${actualSampleRate}Hz`);
+            
             const source = audioContext.createMediaStreamSource(mediaStream);
             scriptProcessor = audioContext.createScriptProcessor(2048, 1, 1);
 
-            // 持续发送音频到 ASR 服务端，不做前端过滤（让服务端 VAD 自己判断）
+            // 重采样函数：将实际采样率降到 16kHz（线性插值）
+            function downsample(buffer, fromSampleRate, toSampleRate) {
+                if (fromSampleRate === toSampleRate) return buffer;
+                const ratio = fromSampleRate / toSampleRate;
+                const newLength = Math.round(buffer.length / ratio);
+                const result = new Float32Array(newLength);
+                
+                // 线性插值
+                for (let i = 0; i < newLength; i++) {
+                    const srcIndex = i * ratio;
+                    const srcIndexFloor = Math.floor(srcIndex);
+                    const srcIndexCeil = Math.min(srcIndexFloor + 1, buffer.length - 1);
+                    const frac = srcIndex - srcIndexFloor;
+                    result[i] = buffer[srcIndexFloor] * (1 - frac) + buffer[srcIndexCeil] * frac;
+                }
+                return result;
+            }
+
+            // 持续发送音频到 ASR 服务端（带音量阈值过滤）
+            const VAD_THRESHOLD = 0.01; // 音量阈值，低于此值认为是静音
+            
             scriptProcessor.onaudioprocess = (e) => {
                 if (!isRecording || !realtimeWs || realtimeWs.readyState !== WebSocket.OPEN) return;
                 const input = e.inputBuffer.getChannelData(0);
 
-                // 计算实时音量，用于驱动波浪
+                // 计算实时音量
                 let energy = 0;
                 for (let i = 0; i < input.length; i++) {
                     energy += Math.abs(input[i]);
                 }
                 currentAudioLevel = energy / input.length;
 
-                const pcm = new Int16Array(input.length);
-                for (let i = 0; i < input.length; i++) {
-                    const s = Math.max(-1, Math.min(1, input[i]));
+                // 音量阈值过滤：低于阈值不发送（避免噪音误识别）
+                if (currentAudioLevel < VAD_THRESHOLD) {
+                    return;
+                }
+
+                // 重采样到 16kHz
+                const resampled = downsample(input, actualSampleRate, 16000);
+
+                // 转换为 Int16 PCM
+                const pcm = new Int16Array(resampled.length);
+                for (let i = 0; i < resampled.length; i++) {
+                    const s = Math.max(-1, Math.min(1, resampled[i]));
                     pcm[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                 }
                 realtimeWs.send(pcm.buffer);
