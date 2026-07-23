@@ -13,6 +13,8 @@ import asyncio
 
 from asr_service import ASRService
 from bailian_realtime_asr_service import BailianRealtimeASRService
+from local_funasr_service import LocalFunASRService
+from config import USE_LOCAL_ASR
 from tts_service import TTSService
 from qwen_tts_service import QwenTTSService
 from llm_service import LLMService
@@ -295,7 +297,7 @@ async def clear_history():
 
 @app.websocket("/ws/realtime-asr")
 async def realtime_asr_websocket(websocket: WebSocket):
-    """实时语音识别 WebSocket 端点 (百炼 qwen3-asr-flash-realtime)"""
+    """实时语音识别 WebSocket 端点 (支持百炼/本地 FunASR 切换)"""
     await websocket.accept()
 
     # 使用 asyncio.Queue 在 ASR 线程和 FastAPI 异步任务之间传递消息
@@ -310,21 +312,47 @@ async def realtime_asr_websocket(websocket: WebSocket):
             loop
         )
 
-    # 创建百炼实时 ASR 服务实例
-    asr = BailianRealtimeASRService()
+    # 根据配置选择 ASR 服务
+    print(f"🔍 USE_LOCAL_ASR = {USE_LOCAL_ASR}")
+    if USE_LOCAL_ASR:
+        print("✅ 使用本地 FunASR (910B)")
+        asr = LocalFunASRService()
+        service_name = '本地 FunASR (910B)'
+    else:
+        print("✅ 使用百炼实时识别")
+        asr = BailianRealtimeASRService()
+        service_name = '百炼实时识别 (qwen3-asr-flash-realtime)' 
 
     # 启动识别，传入回调
-    if not asr.start(result_callback=asr_callback):
+    print(f"🚀 启动 ASR 服务: {service_name}", flush=True)
+    try:
+        success = asr.start(result_callback=asr_callback)
+        print(f"📊 ASR 启动结果: {success}", flush=True)
+        if not success:
+            print(f"❌ 启动 ASR 失败", flush=True)
+            await websocket.send_json({
+                "type": "error",
+                "message": f"启动实时识别失败 ({service_name})"
+            })
+            await websocket.close()
+            return
+        print(f"✅ ASR 服务启动成功", flush=True)
+    except Exception as e:
+        print(f"❌ ASR 启动异常: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
         await websocket.send_json({
             "type": "error",
-            "message": "启动百炼实时识别失败"
+            "message": f"启动实时识别异常: {str(e)}"
         })
         await websocket.close()
         return
+    
+    print(f"✅ ASR 服务启动成功", flush=True)
 
     await websocket.send_json({
         "type": "status",
-        "message": "百炼实时识别已启动 (qwen3-asr-flash-realtime)"
+        "message": f"实时识别已启动 ({service_name})"
     })
 
     send_task = None
@@ -338,17 +366,10 @@ async def realtime_asr_websocket(websocket: WebSocket):
 
         send_task = asyncio.create_task(send_results())
 
-        # 主循环接收前端发来的音频
-        audio_buffer = bytearray()
+        # 主循环接收前端发来的音频，直接透传给 ASR 服务
         while True:
             data = await websocket.receive_bytes()
-            
-            # 累积音频缓冲区，每 100ms 发送一次（约 3200 bytes）
-            audio_buffer.extend(data)
-            if len(audio_buffer) >= 3200:
-                chunk = bytes(audio_buffer[:3200])
-                audio_buffer = audio_buffer[3200:]
-                asr.send_audio(chunk)
+            asr.send_audio(data)
 
     except WebSocketDisconnect:
         print("客户端断开连接")
