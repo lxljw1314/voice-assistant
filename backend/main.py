@@ -38,16 +38,20 @@ tts_service = TTSService()
 qwen_tts_service = QwenTTSService()
 llm_service = LLMService()
 
-# 静态文件 - 使用绝对路径
+# 静态文件 - 使用绝对路径（仅在目录存在时挂载）
 BASE_DIR = Path(__file__).parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
-app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+
+if FRONTEND_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
 
 @app.get("/")
 async def root():
     """返回前端页面"""
-    return FileResponse(str(FRONTEND_DIR / "index.html"))
+    if (FRONTEND_DIR / "index.html").exists():
+        return FileResponse(str(FRONTEND_DIR / "index.html"))
+    return {"message": "星语 AI 语音助手 API 已就绪", "version": "v1.0"}
 
 
 @app.post("/api/asr")
