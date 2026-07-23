@@ -1,0 +1,13 @@
+.git
+.gitignore
+venv
+__pycache__
+*.pyc
+*.log
+.env
+.env.example
+DEPLOYMENT.md
+frontend/
+.venv
+.idea
+.vscode
